@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+tickets.db
+.DS_Store
+.streamlit/
