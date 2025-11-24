@@ -20,7 +20,7 @@ if "GOOGLE_API_KEY" not in os.environ and os.getenv("GEMINI_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
 
 APP_NAME = "ticketing_mas"
-GEMINI_MODEL = "gemini-2.5-flash"  # this is the one you just verified
+GEMINI_MODEL = "gemini-2.5-pro"  # this is the one you just verified
 
 # -----------------------
 # Define a simple ticket triage agent
