@@ -1,4 +1,5 @@
 # backend/main.py
+from backend.orchestrator import run_ai_on_ticket
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -37,6 +38,11 @@ class TicketResponse(BaseModel):
     created_at: str
     updated_at: str
 
+class RunAIResponse(BaseModel):
+    ticket: TicketResponse
+    agent_name: str
+    confidence: float
+
 
 @app.post("/tickets", response_model=TicketResponse)
 def create_ticket_endpoint(req: TicketCreateRequest):
@@ -57,3 +63,21 @@ def get_ticket_endpoint(ticket_id: str):
 @app.get("/tickets")
 def list_tickets_endpoint():
     return list_tickets()
+
+@app.post("/tickets/{ticket_id}/run_ai", response_model=RunAIResponse)
+def run_ai_endpoint(ticket_id: str):
+    """
+    Run the AI orchestrator on a given ticket.
+    For now this uses a rule-based generic agent stub.
+    Later we'll replace the internals with Gemini/ADK.
+    """
+    try:
+        ticket, agent_name, confidence = run_ai_on_ticket(ticket_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    return {
+        "ticket": ticket,
+        "agent_name": agent_name,
+        "confidence": confidence,
+    }
