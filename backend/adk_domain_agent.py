@@ -1,14 +1,19 @@
 # backend/adk_domain_agent.py
-
 import os
 import asyncio
 import json
+import logging
 from typing import Optional, Dict, Any
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # -----------------------
 # Env & API key handling
@@ -16,12 +21,11 @@ from google.genai import types
 load_dotenv()
 
 # ADK expects GOOGLE_API_KEY for Gemini.
-# We already use GEMINI_API_KEY elsewhere, so bridge them.
 if "GOOGLE_API_KEY" not in os.environ and os.getenv("GEMINI_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
 
 APP_NAME = "ticketing_mas"
-GEMINI_MODEL = "gemini-2.5-pro"  # domain classifier uses PRO for better reasoning
+GEMINI_MODEL = "gemini-2.5-pro"
 
 # -----------------------
 # Define the domain classifier agent
@@ -60,30 +64,69 @@ domain_runner = InMemoryRunner(agent=domain_classifier_agent, app_name=APP_NAME)
 
 
 # -----------------------
-# Core helper: run domain agent once
+# Helpers
+# -----------------------
+def _clean_and_parse_json(raw_output: str) -> Dict[str, Any]:
+    parsed: Dict[str, Any] = {
+        "domain": "other",
+        "confidence": 0.0,
+        "reason": "",
+        "summary": "",
+        "suggested_agent": "generic_agent",
+        "raw_output": raw_output or "",
+    }
+
+    if not raw_output:
+        return parsed
+
+    cleaned = raw_output.strip()
+
+    # Strip triple backticks and optional leading language token like "json"
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    # Try JSON parse
+    try:
+        obj = json.loads(cleaned)
+        parsed["domain"] = obj.get("domain", parsed["domain"])
+        parsed["confidence"] = float(obj.get("confidence", parsed["confidence"]) or 0.0)
+        parsed["reason"] = obj.get("reason", parsed["reason"])
+        parsed["summary"] = obj.get("summary", parsed["summary"])
+        parsed["suggested_agent"] = obj.get("suggested_agent", parsed["suggested_agent"])
+        parsed["raw_output"] = cleaned
+    except json.JSONDecodeError:
+        parsed["raw_output"] = cleaned
+
+    return parsed
+
+
+# -----------------------
+# Core helper: run domain agent once (robust)
 # -----------------------
 async def _run_domain_classifier_once(
     description: str,
-    session_id: str = "domain-session",
+    session_id: Optional[str] = None,
     user_id: str = "domain-user",
+    max_retries: int = 1,
 ) -> Dict[str, Any]:
     """
-    Run the domain classifier agent once and return a parsed dict:
-    {
-      "domain": str,
-      "confidence": float,
-      "reason": str,
-      "summary": str,
-      "suggested_agent": str,
-      "raw_output": str
-    }
+    Run the domain classifier agent once and return parsed dict.
+    Uses unique session ids by default to avoid collisions.
+    Retries once on transient errors.
     """
-    # Ensure session exists
-    await domain_runner.session_service.create_session(
-        app_name=APP_NAME,
-        user_id=user_id,
-        session_id=session_id,
-    )
+    # Use a unique session id by default to avoid AlreadyExistsError
+    session_id = session_id or f"domain-session-{uuid4().hex}"
+
+    # Try to create session, but ignore errors (session may already exist in some environments)
+    try:
+        await domain_runner.session_service.create_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session_id
+        )
+    except Exception as e:
+        # Log and continue; if session exists it is not fatal
+        logger.debug("create_session raised (ignored): %s", repr(e))
 
     prompt = (
         "Classify the following ticket description into a support domain and "
@@ -91,46 +134,37 @@ async def _run_domain_classifier_once(
         f"Ticket Description:\n{description}\n"
     )
 
-    user_content = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text=prompt)],
-    )
-
+    user_content = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
     final_text: Optional[str] = None
 
-    async for event in domain_runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=user_content,
-    ):
-        if event.is_final_response() and event.content and event.content.parts:
-            texts = [p.text for p in event.content.parts if getattr(p, "text", None)]
-            if texts:
-                final_text = "\n".join(texts).strip()
-
-    raw_output = final_text or ""
-
-    # Try to parse JSON
-    parsed: Dict[str, Any] = {
-        "domain": "other",
-        "confidence": 0.0,
-        "reason": "",
-        "summary": "",
-        "suggested_agent": "generic_agent",
-        "raw_output": raw_output,
-    }
-
-    if raw_output:
+    attempt = 0
+    last_exc = None
+    while attempt <= max_retries:
+        attempt += 1
         try:
-            obj = json.loads(raw_output)
-            # Merge safely
-            for key in ["domain", "confidence", "reason", "summary", "suggested_agent"]:
-                if key in obj:
-                    parsed[key] = obj[key]
-        except json.JSONDecodeError:
-            # If LLM messed up, keep defaults + raw_output
-            pass
+            async for event in domain_runner.run_async(
+                user_id=user_id, session_id=session_id, new_message=user_content
+            ):
+                if event.is_final_response() and event.content and event.content.parts:
+                    texts = [p.text for p in event.content.parts if getattr(p, "text", None)]
+                    if texts:
+                        final_text = "\n".join(texts).strip()
+            break  # success
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                "domain_runner.run_async attempt %d failed: %s. Retrying if attempts remain.",
+                attempt,
+                repr(e),
+            )
+            await asyncio.sleep(0.3)
+            continue
 
+    if final_text is None:
+        # If still nothing, raise with helpful message
+        raise RuntimeError(f"Domain agent produced no output. Last exception: {repr(last_exc)}")
+
+    parsed = _clean_and_parse_json(final_text)
     return parsed
 
 
@@ -147,7 +181,10 @@ def run_domain_classifier(description: str) -> Dict[str, Any]:
 if __name__ == "__main__":
     test_desc = "User can't connect to VPN and their internet keeps dropping in the office."
     print(">>> Sending test description to domain classifier...\n")
-    result = run_domain_classifier(test_desc)
-    print("=== Parsed result ===")
-    for k, v in result.items():
-        print(f"{k}: {v}")
+    try:
+        result = run_domain_classifier(test_desc)
+        print("=== Parsed result ===")
+        for k, v in result.items():
+            print(f"{k}: {v}")
+    except Exception as e:
+        logger.exception("Domain classifier test failed: %s", e)
