@@ -1,10 +1,12 @@
 # backend/main.py
-from backend.orchestrator import run_ai_on_ticket, run_ai_on_ticket_llm
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
+from backend.orchestrator import run_ai_on_ticket, run_ai_on_ticket_llm
 from backend.db import init_db, create_ticket, get_ticket, list_tickets
+from backend.adk_domain_agent import run_domain_classifier
 
 
 # New lifespan syntax (replaces on_event("startup"))
@@ -46,6 +48,18 @@ class RunAIResponse(BaseModel):
 class RunAILlmResponse(BaseModel):
     ticket: TicketResponse
     ticket_type: str
+    raw_output: str
+
+class DomainClassifyRequest(BaseModel):
+    description: str
+
+
+class DomainClassifyResponse(BaseModel):
+    domain: str
+    confidence: float
+    reason: str
+    summary: str
+    suggested_agent: str
     raw_output: str
 
 @app.post("/tickets", response_model=TicketResponse)
@@ -107,3 +121,30 @@ def run_ai_llm_endpoint(ticket_id: str):
         "ticket_type": ticket_type,
         "raw_output": raw_output,
     }
+
+@app.post("/classify_llm", response_model=DomainClassifyResponse)
+def classify_llm_endpoint(req: DomainClassifyRequest):
+    """
+    Test endpoint for the ADK + Gemini domain_classifier_agent.
+
+    Input:
+      - description: raw ticket text
+
+    Output:
+      - domain
+      - confidence
+      - reason
+      - summary
+      - suggested_agent
+      - raw_output (raw JSON response as string)
+    """
+    result = run_domain_classifier(req.description)
+
+    return DomainClassifyResponse(
+        domain=str(result.get("domain", "other")),
+        confidence=float(result.get("confidence", 0.0) or 0.0),
+        reason=str(result.get("reason", "")),
+        summary=str(result.get("summary", "")),
+        suggested_agent=str(result.get("suggested_agent", "generic_agent")),
+        raw_output=str(result.get("raw_output", "")),
+    )
