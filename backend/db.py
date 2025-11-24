@@ -115,3 +115,39 @@ def list_tickets():
     conn.close()
 
     return [dict(r) for r in rows]
+
+def update_ticket_fields(
+    ticket_id: str,
+    domain: str | None = None,
+    status: str | None = None,
+    resolved_by: str | None = None,
+    resolution: str | None = None,
+):
+    """
+    Update selected fields of a ticket. Only non-None fields are updated.
+    """
+    fields = {}
+    if domain is not None:
+        fields["domain"] = domain
+    if status is not None:
+        fields["status"] = status
+    if resolved_by is not None:
+        fields["resolved_by"] = resolved_by
+    if resolution is not None:
+        fields["resolution"] = resolution
+
+    if not fields:
+        return  # nothing to update
+
+    set_clause = ", ".join([f"{col} = ?" for col in fields.keys()])
+    values = list(fields.values())
+    values.append(ticket_id)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE tickets SET {set_clause}, updated_at = ? WHERE ticket_id = ?",
+        (*fields.values(), datetime.utcnow().isoformat(), ticket_id),
+    )
+    conn.commit()
+    conn.close()
