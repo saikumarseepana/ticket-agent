@@ -8,6 +8,7 @@ import traceback
 from backend.db import init_db, create_ticket, get_ticket, list_tickets
 from backend.orchestrator import run_ai_on_ticket, run_ai_on_ticket_llm, run_ai_on_ticket_hybrid
 from backend.adk_domain_agent import run_domain_classifier
+from backend.admin_api import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class TicketResponse(BaseModel):
     resolution: str | None
     created_at: str
     updated_at: str
+
 
 @app.post("/tickets", response_model=TicketResponse)
 def create_ticket_endpoint(req: TicketCreateRequest):
@@ -86,3 +88,5 @@ def run_ai_hybrid_endpoint(ticket_id: str):
         logger.error("Error in /run_ai_hybrid for ticket %s: %s", ticket_id, tb)
         raise HTTPException(status_code=502, detail="Hybrid orchestrator error. Check server logs.")
     return {"ticket": updated_ticket, "details": details}
+
+app.include_router(admin_router)
